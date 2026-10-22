@@ -59,6 +59,10 @@ def export_vendor(root, vendor, component, out):
          "CC=" + cc, "CXX=" + cxx, "EXTRA_CFLAGS=-DNV_UNIX"], cwd=directory,
         log=out / "logs" / f"{component}-make-export.log")
     flags = shlex.split((generated / "ci-cflags.txt").read_text())
+    # NVIDIA 615 adds Linux's external return thunk even for TARGET_OS=Darwin.
+    # XNU does not export __x86_return_thunk. Use the compiler's native Darwin
+    # returns, as the official kext does, rather than inventing a kernel import.
+    flags = [flag for flag in flags if flag != "-mfunction-return=thunk-extern"]
     cc_flags = shlex.split((generated / "ci-cc-only-cflags.txt").read_text())
     cxx_flags = shlex.split((generated / "ci-cxx-only-cflags.txt").read_text())
     sources = shlex.split((generated / "ci-sources.txt").read_text())
