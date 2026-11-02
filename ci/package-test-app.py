@@ -45,6 +45,13 @@ page.write_text(html.replace("<h1>Your Mac, mapped</h1>",
 # with invalid signatures or add a signature-check bypass.
 signature_source = "mac/Sources/ReleaseSignature.swift"
 assert subprocess.check_output(["git", "show", f"{expected}:{signature_source}"], cwd=app) == (app / signature_source).read_bytes()
+build_script = app / "mac/build.sh"
+build_source = build_script.read_text()
+# Bash 3 (the Intel runner's /bin/bash) treats an empty array as unbound under
+# set -u. A nonempty env prefix runs the same tests and preserves error exits.
+assert build_source.count('RUN=(); [ "$(uname -m)" = arm64 ] && RUN=(arch -x86_64)') == 1
+build_script.write_text(build_source.replace('RUN=(); [ "$(uname -m)" = arm64 ] && RUN=(arch -x86_64)',
+                                             'RUN=(env); [ "$(uname -m)" = arm64 ] && RUN=(arch -x86_64)'))
 subprocess.run(["bash", "mac/build.sh", str(root / "app-build")], cwd=app, check=True)
 old_bundle = root / "app-build/1401.app"
 bundle = old_bundle.with_name("1401-RTX6000-BAR-Preflight-Test.app")

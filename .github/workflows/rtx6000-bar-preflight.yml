@@ -1,10 +1,14 @@
 name: RTX6000 BAR preflight test 2.6.6
 on:
   workflow_dispatch:
-  push:
-    branches: [test/rtx6000-bar-preflight-v2.6.6]
+    inputs:
+      reuse_run_id:
+        description: "Reuse a driver artifact with identical driver sources; leave empty for a full build"
+        required: false
+        default: ""
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: bar-preflight-${{ github.ref }}
   cancel-in-progress: true
@@ -17,7 +21,36 @@ jobs:
         with:
           lfs: false
           persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 2
+      - name: Recover the already verified driver artifact
+        if: inputs.reuse_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.reuse_run_id }}
+          pattern: rtx6000-bar-preflight-2.6.6-*
+          merge-multiple: true
+          path: build-out
+      - name: Verify recovered driver identity and unchanged build inputs
+        if: inputs.reuse_run_id != ''
+        run: |
+          test "${{ inputs.reuse_run_id }}" = 41467731837
+          git diff --exit-code aa37905261493814003f2b7fc27ff3f352f6d0ce HEAD -- kexts ci/build-macos-kexts.py ci/package-experiment.py ci/export-nvidia.mk ci/patches
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          p = Path('build-out')
+          proof = json.loads((p / 'build-proof.json').read_text())
+          assert proof['status'] == 'KEXTS_COMPILED_HARDWARE_NOT_TESTED'
+          assert proof['fork_commit'] == 'aa37905261493814003f2b7fc27ff3f352f6d0ce'
+          assert proof['upstream'] == 'v2.6.6'
+          for line in (p / 'SHA256SUMS.txt').read_text().splitlines():
+              expected, name = line.split(maxsplit=1)
+              assert name == 'nullmoth-2.6.6-rtx6000-bar-preflight-v1.tar.gz'
+              with (p / name).open('rb') as f:
+                  assert hashlib.file_digest(f, 'sha256').hexdigest() == expected
+          print('Recovered driver bytes and build sources verified; rebuilding App only')
+          PY
       - name: Select matching Intel macOS toolchain
         run: |
           test "$(uname -m)" = x86_64
@@ -32,6 +65,7 @@ jobs:
           set -o pipefail
           python3 ci/test-bar-preflight.py 2>&1 | tee build-out/logs/preflight-tests.log
       - name: Fetch pinned NVIDIA source and matching official patches
+        if: inputs.reuse_run_id == ''
         run: |
           git clone --depth 1 --branch 615.78.08 https://github.com/NVIDIA/open-gpu-kernel-modules.git .deps/open-gpu-kernel-modules
           test "$(git -C .deps/open-gpu-kernel-modules rev-parse HEAD)" = 1a82fbfda8f321b056eb3568850f9316c5e465c5
@@ -42,8 +76,10 @@ jobs:
           git -C .deps/open-gpu-kernel-modules apply --directory=src/nvidia-modeset ../../kexts/NVRM/patches/610-backlight-register-log.patch
           git -C .deps/open-gpu-kernel-modules apply --recount --directory=src/nvidia-modeset ../../kexts/NVRM/patches/615-viewport-scaling.patch
       - name: Build and link the native Intel kexts
+        if: inputs.reuse_run_id == ''
         run: python3 ci/build-macos-kexts.py --vendor .deps/open-gpu-kernel-modules --output build-out --jobs 4
       - name: Replace only NVRM in the checksum-pinned official 2.6.6 package
+        if: inputs.reuse_run_id == ''
         run: python3 ci/package-experiment.py --output build-out
       - name: Build matching offline 1401 App
         run: |
