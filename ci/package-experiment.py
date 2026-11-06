@@ -43,7 +43,7 @@ def main():
     if out == root or not out.is_relative_to(root):
         raise SystemExit("Output must be a build directory inside this checkout.")
     proof = json.loads((out / "build-proof.json").read_text())
-    if proof["status"] != "KEXTS_COMPILED_HARDWARE_NOT_TESTED" or proof["experiment"] != "bar-preflight-v1":
+    if proof["status"] != "KEXTS_COMPILED_HARDWARE_NOT_TESTED" or proof["experiment"] != "scanout-map-v1":
         raise SystemExit("Both kext builds must succeed before packaging.")
     for name in ("NVRM", "NVRMFB"):
         p = out / "kexts" / (name + ".kext") / "Contents/MacOS" / name
@@ -67,30 +67,30 @@ def main():
                    for p in package.rglob("*") if p.is_file() and not p.is_symlink()}
     verifier = SourceFileLoader("verify_kext_imports", str(root / "ci/verify-kext-imports.py")).load_module()
     verifier.verify_imports(out / "kexts", package / "Library/Extensions", out / "logs/import-validation.json")
-    for name in ("NVRM",):
+    for name in ("NVRM", "NVRMFB"):
         target = (package / "Library/Extensions" / (name + ".kext")).resolve()
         if not target.is_relative_to(package.resolve()) or target.name != name + ".kext":
             raise SystemExit("Unexpected package kext destination.")
         shutil.rmtree(target)
         shutil.copytree(out / "kexts" / (name + ".kext"), target)
-    proof["replaced_kexts"] = ["NVRM"]
+    proof["replaced_kexts"] = ["NVRM", "NVRMFB"]
     retained = {name: sha for name, sha in stock_files.items()
-                if name != "SHA256SUMS" and not name.startswith("Library/Extensions/NVRM.kext/")}
+                if name != "SHA256SUMS" and not name.startswith(("Library/Extensions/NVRM.kext/", "Library/Extensions/NVRMFB.kext/"))}
     for name, sha in retained.items():
         if digest(package / name) != sha:
             raise SystemExit(f"Unexpected change to official package file: {name}")
     proof["unchanged_official_files"] = retained
     proof["stock_package_sha256"] = STOCK_SHA256
-    proof["stock_components_retained"] = ["NVRMFB", "NVAccel", "NVRMAGDC", "all user-space and firmware files", "official install and uninstall scripts"]
-    proof["package_note"] = "Personal small-BAR research build based on NullMoth 2.7.1. Not hardware validated."
-    (package / "Library/NullMoth/bar-preflight-v1.json").parent.mkdir(parents=True, exist_ok=True)
-    (package / "Library/NullMoth/bar-preflight-v1.json").write_text(json.dumps(proof, indent=2) + "\n")
+    proof["stock_components_retained"] = ["NVAccel", "NVRMAGDC", "all user-space and firmware files", "official install and uninstall scripts"]
+    proof["package_note"] = "Personal PCI-resource scanout mapping experiment with BAR Preflight, based on NullMoth 2.7.1. Not hardware validated."
+    (package / "Library/NullMoth/scanout-map-v1.json").parent.mkdir(parents=True, exist_ok=True)
+    (package / "Library/NullMoth/scanout-map-v1.json").write_text(json.dumps(proof, indent=2) + "\n")
     (package / "EXPERIMENTAL-BUILD.json").write_text(json.dumps(proof, indent=2) + "\n")
     checksum = package / "SHA256SUMS"
     lines = [f"{digest(p)}  {p.relative_to(package).as_posix()}" for p in sorted(package.rglob("*"))
              if p.is_file() and p != checksum and not p.is_symlink()]
     checksum.write_text("\n".join(lines) + "\n")
-    suffix = "bar-preflight-v1"
+    suffix = "scanout-map-v1"
     archive = out / f"nullmoth-2.7.1-rtx6000-{suffix}.tar.gz"
     with tarfile.open(archive, "w:gz") as tf:
         tf.add(package, arcname="pkgroot")

@@ -3515,16 +3515,28 @@ bool NVRMNVDAFramebuffer::verifyAperture(NvU64 phys, const char *label)
     const UInt32 SIG1 = 0xC0DE1111, SIG2 = 0xC0DE2222;
     if (!phys || !fKva) return false;
     volatile UInt32 *k = (volatile UInt32 *)fKva;
+    const UInt32 old1 = k[0x1000 / 4], old2 = k[0x2000 / 4];
     k[0x1000 / 4] = SIG1;
     k[0x2000 / 4] = SIG2;
     __asm__ volatile("mfence" ::: "memory");
-    if (k[0x1000 / 4] != SIG1 || k[0x2000 / 4] != SIG2) {
+    const UInt32 control1 = k[0x1000 / 4], control2 = k[0x2000 / 4];
+    FBLOG("scanout-map-v1: %s phys=0x%llx bytes=0x%llx "
+          "before=%08x/%08x wrote=%08x/%08x read=%08x/%08x CONTROL=%s",
+          label, phys, fMemBytes, old1, old2, SIG1, SIG2, control1, control2,
+          control1 == SIG1 && control2 == SIG2 ? "PASS" : "FAIL");
+    if (control1 != SIG1 || control2 != SIG2) {
+        k[0x1000 / 4] = old1; k[0x2000 / 4] = old2;
+        __asm__ volatile("mfence" ::: "memory");
         FBLOG("verifyAperture(%s): CONTROL FAILED -- the write never landed through fKva; "
               "the readback says nothing about the address", label);
         return false;
     }
     IODeviceMemory *dm = apertureFor(phys, 0x4000);
-    if (!dm) { FBLOG("verifyAperture(%s) 0x%llx: no descriptor", label, phys); return false; }
+    if (!dm) {
+        k[0x1000 / 4] = old1; k[0x2000 / 4] = old2;
+        __asm__ volatile("mfence" ::: "memory");
+        FBLOG("verifyAperture(%s) 0x%llx: no descriptor", label, phys); return false;
+    }
     IOMemoryMap *mm = dm->map(kIOMapWriteCombineCache);
     bool ok = false;
     if (!mm) {
@@ -3540,6 +3552,8 @@ bool NVRMNVDAFramebuffer::verifyAperture(NvU64 phys, const char *label)
         mm->release();
     }
     dm->release();
+    k[0x1000 / 4] = old1; k[0x2000 / 4] = old2;
+    __asm__ volatile("mfence" ::: "memory");
     return ok;
 }
 

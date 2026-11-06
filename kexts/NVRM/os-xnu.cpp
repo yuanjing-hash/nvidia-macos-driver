@@ -5,6 +5,7 @@
  */
 
 #include "nv-xnu.h"
+#include <IOKit/IOSubMemoryDescriptor.h>
 
 extern "C" void nv_xnu_power_state(bool *acPlugged, bool *haveBattery);   // nv_xnu_power.cpp
 #include <sys/kauth.h>
@@ -349,6 +350,42 @@ static inline void nv_xnu_map_publish(nv_xnu_map *m, IOMemoryDescriptor *md, IOM
     m->md = md; m->map = map; m->phys = phys; m->size = size; m->alias = alias;
     __atomic_store_n(&m->va, va, __ATOMIC_RELEASE);
 }
+extern "C" nv_state_t *nv_xnu_gpu_state(void);
+// Keep the small TU102 aperture tied to its PCI resource, like the framebuffer's
+// user mapping. Do not fabricate a physical descriptor if that resource cannot
+// cover the allocation, and do not create conflicting UC/WC aliases to test it.
+static IOMemoryDescriptor *nv_xnu_scanout_resource(NvU64 start, NvU64 size, bool *selected)
+{
+    *selected = false;
+    nv_state_t *nv = nv_xnu_gpu_state();
+    if (!nv || nv->pci_info.vendor_id != 0x10de || nv->pci_info.device_id != 0x1e30) return NULL;
+    const NvU64 base = nv->bars[NV_GPU_BAR_INDEX_FB].cpu_address;
+    const NvU64 length = nv->bars[NV_GPU_BAR_INDEX_FB].size;
+    if (!base || !length || length > (256ull << 20) || !size ||
+        start < base || size > length || start - base > length - size) return NULL;
+    *selected = true;
+    const nv_xnu_pci_slot *slot = (const nv_xnu_pci_slot *)nv->handle;
+    IOPCIDevice *pci = slot ? slot->pci : NULL;
+    if (!pci) { kprintf("NVRM-xnu: bar1-resource-map-v1: no GPU PCI handle; refusing map\n"); return NULL; }
+    for (IOItemCount i = 0; i < pci->getDeviceMemoryCount(); i++) {
+        IOMemoryDescriptor *parent = pci->getDeviceMemoryWithIndex(i);
+        if (!parent) continue;
+        IOByteCount segmentLength = 0;
+        const addr64_t pa = parent->getPhysicalSegment(0, &segmentLength, kIOMemoryMapperNone);
+        if ((NvU64)pa != base || parent->getLength() != length || segmentLength < length) continue;
+        IOMemoryDescriptor *sub = IOSubMemoryDescriptor::withSubRange(
+            parent, (IOByteCount)(start - base), (IOByteCount)size, kIODirectionInOut);
+        kprintf("NVRM-xnu: bar1-resource-map-v1: PCI %02x:%02x.%u command=0x%x "
+                "resource=%u BAR1=0x%llx+0x%llx offset=0x%llx size=0x%llx descriptor=%s\n",
+                (unsigned)slot->bus, (unsigned)slot->slot, (unsigned)slot->function,
+                (unsigned)pci->configRead16(0x04), (unsigned)i, base, length, start - base, size,
+                sub ? "ready" : "FAILED");
+        return sub;
+    }
+    kprintf("NVRM-xnu: bar1-resource-map-v1: no contiguous PCI resource matches BAR1 "
+            "0x%llx+0x%llx; refusing map 0x%llx+0x%llx\n", base, length, start, size);
+    return NULL;
+}
 void *NV_API_CALL os_map_kernel_space(NvU64 start, NvU64 size, NvU32 mode)
 {
     IOOptionBits cache = (mode == NV_MEMORY_CACHED) ? kIOMapDefaultCache : (mode == NV_MEMORY_WRITECOMBINED ? kIOMapWriteCombineCache : kIOMapInhibitCache);
@@ -367,7 +404,13 @@ void *NV_API_CALL os_map_kernel_space(NvU64 start, NvU64 size, NvU32 mode)
         }
         nv_pm_foreign(start, size, mode, __builtin_return_address(0));
     }
-    IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)start, (IOByteCount)size, kIODirectionInOut);
+    bool resourceSelected = false;
+    IOMemoryDescriptor *md = nv_xnu_scanout_resource(start, size, &resourceSelected);
+    if (resourceSelected && !md) return NULL;
+    if (!resourceSelected)
+        md = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)start, (IOByteCount)size, kIODirectionInOut);
+    if (resourceSelected)
+        kprintf("NVRM-xnu: bar1-resource-map-v1: preserve requested cache mode=%u IOKit=0x%x\n", mode, (unsigned)cache);
     if (!md) { kprintf("NVRM-xnu:   withPhysicalAddress FAILED\n"); }
     IOMemoryMap *map = md ? md->map(cache) : NULL;
     if (md && !map) { kprintf("NVRM-xnu:   md->map(cache=0x%x) FAILED\n", (unsigned)cache); md->release(); md = NULL; }
